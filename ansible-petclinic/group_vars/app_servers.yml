@@ -1,0 +1,11 @@
+---
+# ==============================================================================
+# Group Variables: app_servers
+# Override docker_tag at runtime: -e "docker_tag=1.0.0"
+# ==============================================================================
+
+docker_image: "uday6395/spring-petclinic"
+docker_tag: "latest"
+container_name: "spring-petclinic"
+container_port: 8080
+host_port: 8080

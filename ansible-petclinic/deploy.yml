@@ -1,0 +1,176 @@
+---
+# ==============================================================================
+# Ansible Playbook: Deploy Spring Petclinic (Docker-based)
+# Image: uday6395/spring-petclinic
+# Usage: ansible-playbook -i inventory.ini deploy.yml
+#        ansible-playbook -i inventory.ini deploy.yml -e "docker_tag=1.0.0"
+# ==============================================================================
+
+- name: Deploy Spring Petclinic Application
+  hosts: app_servers
+  become: true
+  vars:
+    docker_image: "uday6395/spring-petclinic"
+    docker_tag: "latest"
+    container_name: "spring-petclinic"
+    container_port: 8080
+    host_port: 8080
+
+  # --------------------------------------------------------------------------
+  # PRE-TASKS: Validate connectivity and OS
+  # --------------------------------------------------------------------------
+  pre_tasks:
+    - name: Verify target host is reachable
+      ansible.builtin.ping:
+
+    - name: Print deployment info
+      ansible.builtin.debug:
+        msg:
+          - "Target host   : {{ inventory_hostname }}"
+          - "Docker image  : {{ docker_image }}:{{ docker_tag }}"
+          - "Container port: {{ host_port }}:{{ container_port }}"
+
+  # --------------------------------------------------------------------------
+  # TASKS
+  # --------------------------------------------------------------------------
+  tasks:
+
+    # ── Block 1: Install Docker ──────────────────────────────────────────────
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install Docker dependencies
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - python3-pip
+        state: present
+
+    - name: Install Docker (docker.io package)
+      ansible.builtin.apt:
+        name: docker.io
+        state: present
+
+    - name: Install python3-docker (required for Ansible Docker modules)
+      ansible.builtin.apt:
+        name: python3-docker
+        state: present
+
+    - name: Ensure Docker service is started and enabled
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add ansible user to docker group (avoid needing sudo for docker)
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+
+    # ── Block 2: Pull Docker Image ───────────────────────────────────────────
+    - name: Pull spring-petclinic Docker image from Docker Hub
+      community.docker.docker_image:
+        name: "{{ docker_image }}"
+        tag: "{{ docker_tag }}"
+        source: pull
+        force_source: true
+      register: pull_result
+
+    - name: Print pulled image digest
+      ansible.builtin.debug:
+        msg: "Pulled image: {{ docker_image }}:{{ docker_tag }}"
+
+    # ── Block 3: Deploy Container ────────────────────────────────────────────
+    - name: Stop and remove existing container (if any)
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        state: absent
+        force_kill: true
+      ignore_errors: true
+
+    - name: Run spring-petclinic container
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        image: "{{ docker_image }}:{{ docker_tag }}"
+        state: started
+        restart_policy: always
+        ports:
+          - "{{ host_port }}:{{ container_port }}"
+        env:
+          SPRING_PROFILES_ACTIVE: "default"
+        healthcheck:
+          test: ["CMD", "curl", "-f", "http://localhost:{{ container_port }}/actuator/health"]
+          interval: 30s
+          timeout: 10s
+          retries: 5
+          start_period: 60s
+      register: container_result
+
+    - name: Print container status
+      ansible.builtin.debug:
+        msg: "Container '{{ container_name }}' is {{ container_result.container.State.Status }}"
+
+    # ── Block 4: Health Check ────────────────────────────────────────────────
+    - name: Wait for application to be ready (up to 120 seconds)
+      ansible.builtin.wait_for:
+        host: "localhost"
+        port: "{{ container_port }}"
+        delay: 10
+        timeout: 120
+        state: started
+
+    - name: Verify application responds with HTTP 200
+      ansible.builtin.uri:
+        url: "http://localhost:{{ container_port }}"
+        method: GET
+        status_code: 200
+        timeout: 30
+      register: health_check
+      retries: 5
+      delay: 10
+      until: health_check.status == 200
+
+    - name: Confirm deployment success
+      ansible.builtin.debug:
+        msg:
+          - "✅ Deployment successful!"
+          - "Application URL: http://{{ ansible_host }}:{{ host_port }}"
+          - "HTTP Status    : {{ health_check.status }}"
+
+  # --------------------------------------------------------------------------
+  # POST-TASKS: Final status report
+  # --------------------------------------------------------------------------
+  post_tasks:
+    - name: Gather running container info
+      community.docker.docker_container_info:
+        name: "{{ container_name }}"
+      register: container_info
+
+    - name: Final deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "================================================"
+          - "  Spring Petclinic Deployment Summary"
+          - "================================================"
+          - "  Host          : {{ inventory_hostname }} ({{ ansible_host }})"
+          - "  Image         : {{ docker_image }}:{{ docker_tag }}"
+          - "  Container     : {{ container_name }}"
+          - "  Status        : {{ container_info.container.State.Status }}"
+          - "  App URL       : http://{{ ansible_host }}:{{ host_port }}"
+          - "================================================"
+
+  # --------------------------------------------------------------------------
+  # HANDLERS
+  # --------------------------------------------------------------------------
+  handlers:
+    - name: Restart Docker service
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
